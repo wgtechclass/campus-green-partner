@@ -6,6 +6,8 @@
   const GROUP_KEY = "greenPartner_groupNo";
   const TEAM_NAME_KEY = "greenPartner_teamName";
   const TEACHER_CODE_KEY = "greenPartner_teacherCode";
+  const API_RETRY_LIMIT = 2;
+  const API_RETRY_DELAY_MS = 900;
 
   const app = document.querySelector("#app");
   const toast = document.querySelector("#toast");
@@ -196,16 +198,71 @@
       return localApi(action, payload);
     }
 
+    let lastError;
+    for (let attempt = 0; attempt <= API_RETRY_LIMIT; attempt += 1) {
+      try {
+        return await remoteApi(action, payload);
+      } catch (error) {
+        lastError = normalizeApiError(error);
+        if (!lastError.retryable || attempt === API_RETRY_LIMIT) break;
+        await sleep(API_RETRY_DELAY_MS * (attempt + 1));
+      }
+    }
+
+    throw new Error(lastError?.userMessage || "資料連線暫時不穩，請重新整理後再試");
+  }
+
+  async function remoteApi(action, payload) {
     const response = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ action, payload })
     });
-    const json = await response.json();
-    if (!json.success) {
-      throw new Error(json.message || "資料處理失敗");
+    const text = await response.text();
+
+    if (!response.ok) {
+      throw makeApiError(`後端連線失敗（${response.status}），請稍後重新整理`, response.status >= 500 || response.status === 429);
     }
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      const isHtml = text.trim().startsWith("<");
+      throw makeApiError(
+        isHtml ? "資料連線暫時不穩，請重新整理後再試" : "後端回傳格式異常，請重新整理後再試",
+        true
+      );
+    }
+
+    if (!json || typeof json !== "object" || typeof json.success === "undefined") {
+      throw makeApiError("後端回傳格式異常，請重新整理後再試", true);
+    }
+
+    if (!json.success) {
+      throw makeApiError(json.message || "資料處理失敗", false);
+    }
+
     return json.data;
+  }
+
+  function normalizeApiError(error) {
+    if (error?.userMessage) return error;
+    if (error instanceof TypeError) {
+      return makeApiError("資料連線暫時不穩，請重新整理後再試", true);
+    }
+    return makeApiError(error?.message || "資料處理失敗", false);
+  }
+
+  function makeApiError(message, retryable) {
+    const error = new Error(message);
+    error.userMessage = message;
+    error.retryable = retryable;
+    return error;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   async function localApi(action, payload = {}) {
@@ -1547,7 +1604,15 @@ ${rows || "目前尚無學生回報資料。"}`;
   }
 
   function renderError(message) {
-    return `<section class="page"><div class="empty-state"><h2>${escapeHtml(message)}</h2></div></section>`;
+    const canRetry = /連線|後端|載入|資料/.test(message);
+    return `
+      <section class="page">
+        <div class="empty-state">
+          <h2>${escapeHtml(message)}</h2>
+          ${canRetry ? `<button class="primary-button" type="button" onclick="location.reload()">重新整理</button>` : ""}
+        </div>
+      </section>
+    `;
   }
 
   function formatDelta(delta = {}) {
