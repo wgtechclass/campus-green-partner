@@ -1,0 +1,4 @@
+config.local.js
+.agents/
+.DS_Store
+Thumbs.db
